@@ -5,3 +5,4 @@ twilio>=9.3
 python-dotenv>=1.0
 pydantic>=2.7
 pytest>=8.2
+PyQt6>=6.6

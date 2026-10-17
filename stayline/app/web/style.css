@@ -192,6 +192,16 @@ audio { height: 28px; margin-top: 8px; width: 320px; }
 }
 .hidden { display: none; }
 
+.api-key-input {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  width: 130px;
+}
+
 @media (max-width: 1000px) {
   .layout { grid-template-columns: 1fr; }
   .span2 { grid-column: span 1; }

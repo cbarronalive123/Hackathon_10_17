@@ -61,9 +61,6 @@ class ElevenLabsClient:
     def update_agent(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self._json("PATCH", f"/v1/convai/agents/{agent_id}", payload)
 
-    def get_agent(self, agent_id: str) -> dict[str, Any]:
-        return self._json("GET", f"/v1/convai/agents/{agent_id}")
-
     def list_agents(self) -> list[dict[str, Any]]:
         result = self._json("GET", "/v1/convai/agents")
         if isinstance(result, dict):
@@ -100,9 +97,3 @@ class ElevenLabsClient:
 
     def get_conversation(self, conversation_id: str) -> dict[str, Any]:
         return self._json("GET", f"/v1/convai/conversations/{conversation_id}")
-
-    def get_signed_url(self, agent_id: str) -> str:
-        result = self._json(
-            "GET", f"/v1/convai/conversation/get-signed-url?agent_id={agent_id}"
-        )
-        return result.get("signed_url", "")

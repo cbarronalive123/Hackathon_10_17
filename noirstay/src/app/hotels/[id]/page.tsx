@@ -7,6 +7,7 @@ import HotelCard, { Stars } from "@/components/HotelCard";
 import { one, query } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { isoInDays } from "@/lib/dates";
+import { getHotelContact } from "@/lib/liteapi";
 import type { Hotel } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -24,8 +25,22 @@ export default async function HotelDetailPage({ params }: { params: Params }) {
   const hotelId = Number(id);
   if (!Number.isInteger(hotelId) || hotelId <= 0) notFound();
 
-  const hotel = await one<Hotel>("SELECT * FROM hotels WHERE id = $1", [hotelId]);
+  let hotel = await one<Hotel>("SELECT * FROM hotels WHERE id = $1", [hotelId]);
   if (!hotel) notFound();
+
+  // Live-inventory hotels: lazily fetch + cache contact details (phone/email)
+  // from liteAPI on first view, so every hotel page ends up with real contacts.
+  if (hotel.provider_hotel_id && (!hotel.phone || !hotel.email)) {
+    const contact = await getHotelContact(hotel.provider_hotel_id).catch(() => ({}));
+    if (contact.phone || contact.email) {
+      hotel = { ...hotel, phone: hotel.phone ?? contact.phone, email: hotel.email ?? contact.email };
+      await query("UPDATE hotels SET phone = COALESCE(phone, $1), email = COALESCE(email, $2) WHERE id = $3", [
+        contact.phone ?? null,
+        contact.email ?? null,
+        hotel.id,
+      ]).catch(() => {});
+    }
+  }
 
   const session = await getCurrentUser();
   const nearby = await query<Hotel>(
@@ -67,6 +82,33 @@ export default async function HotelDetailPage({ params }: { params: Params }) {
                 <p className="mt-1 text-xs text-zinc-600">
                   Listed by <span className="text-zinc-400">{hotel.provider}</span>
                 </p>
+                {(hotel.phone || hotel.email || hotel.provider_hotel_id) && (
+                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                    {hotel.phone && (
+                      <a href={`tel:${hotel.phone}`} className="text-zinc-300 hover:text-white" title="Call the hotel">
+                        ☎ {hotel.phone}
+                      </a>
+                    )}
+                    {hotel.email && (
+                      <a href={`mailto:${hotel.email}`} className="text-zinc-300 hover:text-white" title="Email the hotel">
+                        ✉ {hotel.email}
+                      </a>
+                    )}
+                    {hotel.provider_hotel_id && (
+                      <span className="text-xs text-zinc-500">Ref #{hotel.provider_hotel_id}</span>
+                    )}
+                    <a
+                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+                        `${hotel.name} ${hotel.address} ${hotel.city}`
+                      )}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-zinc-300 underline decoration-zinc-700 underline-offset-4 hover:text-white"
+                    >
+                      View on Google Maps ↗
+                    </a>
+                  </div>
+                )}
               </div>
               <div className="rounded-lg border border-zinc-800 bg-black/60 px-4 py-2 text-sm">
                 <span className="font-semibold text-white">{hotel.guest_rating.toFixed(1)}</span>

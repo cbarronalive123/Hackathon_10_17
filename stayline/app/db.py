@@ -97,8 +97,22 @@ class Store:
                     voucher_url TEXT,
                     raw TEXT
                 );
+                CREATE TABLE IF NOT EXISTS phone_cache (
+                    hotel_id TEXT PRIMARY KEY,
+                    phone TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_tool_events_conversation ON tool_events(conversation_id);
+                CREATE INDEX IF NOT EXISTS idx_calls_status ON calls(status);
+                CREATE INDEX IF NOT EXISTS idx_calls_conversation ON calls(conversation_id);
                 """
             )
+            for column in ("voice_twiml TEXT", "link_attempts INTEGER NOT NULL DEFAULT 0"):
+                try:
+                    conn.execute(f"ALTER TABLE calls ADD COLUMN {column}")
+                except sqlite3.OperationalError:
+                    pass
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
@@ -196,6 +210,7 @@ class Store:
             "call_successful",
             "recording_url",
             "error",
+            "voice_twiml",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
@@ -222,17 +237,43 @@ class Store:
 
     def active_calls(self) -> list[dict[str, Any]]:
         placeholders = ", ".join("?" for _ in ACTIVE_STATUSES)
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat(timespec="seconds")
+        now = datetime.now(timezone.utc)
+        link_cutoff = (now - timedelta(minutes=90)).isoformat(timespec="seconds")
+        orphan_cutoff = (now - timedelta(minutes=45)).isoformat(timespec="seconds")
         with closing(self._conn()) as conn:
             rows = conn.execute(
                 f"SELECT * FROM calls WHERE status IN ({placeholders}) "
-                "OR (conversation_id IS NOT NULL AND transcript IS NULL) "
+                "OR (conversation_id IS NOT NULL AND transcript IS NULL AND updated_at >= ?) "
                 "OR (status IN ('completed','failed','no_answer','cancelled') "
-                "AND conversation_id IS NULL AND created_at >= ?) "
+                "AND conversation_id IS NULL AND created_at >= ? AND link_attempts < 10) "
                 "ORDER BY id DESC LIMIT 20",
-                (*ACTIVE_STATUSES, cutoff),
+                (*ACTIVE_STATUSES, link_cutoff, orphan_cutoff),
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
+
+    def bump_link_attempts(self, call_id: int) -> None:
+        with closing(self._conn()) as conn, conn:
+            conn.execute(
+                "UPDATE calls SET link_attempts = COALESCE(link_attempts, 0) + 1, "
+                "updated_at = ? WHERE id = ?",
+                (now_iso(), call_id),
+            )
+
+    def get_cached_phone(self, hotel_id: str) -> tuple[str, str] | None:
+        with closing(self._conn()) as conn:
+            row = conn.execute(
+                "SELECT phone, source FROM phone_cache WHERE hotel_id = ?", (hotel_id,)
+            ).fetchone()
+        return (row["phone"], row["source"]) if row else None
+
+    def cache_phone(self, hotel_id: str, phone: str, source: str) -> None:
+        with closing(self._conn()) as conn, conn:
+            conn.execute(
+                "INSERT INTO phone_cache (hotel_id, phone, source, updated_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(hotel_id) DO UPDATE SET phone = excluded.phone, "
+                "source = excluded.source, updated_at = excluded.updated_at",
+                (hotel_id, phone, source, now_iso()),
+            )
 
     def latest_sim_call(self) -> dict[str, Any] | None:
         with closing(self._conn()) as conn:

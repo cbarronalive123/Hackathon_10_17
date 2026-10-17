@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS hotels (
   amenities      TEXT[]       NOT NULL DEFAULT '{}',
   provider       TEXT         NOT NULL DEFAULT 'NoirStay Direct',
   provider_hotel_id TEXT      UNIQUE,
+  phone           TEXT,
   featured       BOOLEAN      NOT NULL DEFAULT FALSE,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );

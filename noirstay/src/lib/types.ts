@@ -23,6 +23,14 @@ export interface Hotel {
   provider: string;
   featured: boolean;
   created_at: string;
+  /** Live-inventory hotel reference (liteAPI provider_hotel_id), e.g. "lp6f715" */
+  reference?: string | null;
+  /** liteAPI provider hotel id (raw column name from the DB) */
+  provider_hotel_id?: string | null;
+  /** Hotel contact phone, when known from live inventory */
+  phone?: string | null;
+  /** Hotel contact email, when known from live inventory */
+  email?: string | null;
 }
 
 export interface Booking {

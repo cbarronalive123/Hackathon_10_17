@@ -140,11 +140,6 @@ class LiteAPIClient:
         results.sort(key=lambda r: r.get("total") or 0)
         return results
 
-    def hotel_details(self, hotel_id: str) -> dict[str, Any] | None:
-        payload = self._request("GET", f"/data/hotels?hotelIds={hotel_id}")
-        data = payload.get("data") or []
-        return data[0] if data else None
-
     def prebook(self, offer_id: str, adults: int = 2, currency: str = "USD") -> dict[str, Any]:
         body = {
             "offerId": offer_id,

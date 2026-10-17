@@ -300,22 +300,41 @@ export default function VoiceChat() {
               {m.hotels && m.hotels.length > 0 && (
                 <div className="mt-3 space-y-2">
                   {m.hotels.map((h) => (
-                    <Link
-                      key={h.id}
-                      href={`/hotels/${h.id}`}
-                      className="flex items-center justify-between gap-3 rounded border border-zinc-800 bg-black px-3 py-2 transition-colors hover:border-zinc-500"
-                    >
-                      <div>
-                        <p className="text-sm font-medium text-white">{h.name}</p>
-                        <p className="text-xs text-zinc-500">
-                          {h.city}, {h.country} · {h.star_rating}★ · {h.guest_rating}/10
-                        </p>
+                    <div key={h.id} className="rounded border border-zinc-800 bg-black px-3 py-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-white">{h.name}</p>
+                          <p className="text-xs text-zinc-500">
+                            {h.city}, {h.country} · {h.star_rating}★ · {h.guest_rating}/10
+                          </p>
+                        </div>
+                        <span className="shrink-0 text-sm font-semibold text-zinc-200">
+                          ${h.price_per_night}
+                          <span className="text-xs font-normal text-zinc-500">/night</span>
+                        </span>
                       </div>
-                      <span className="shrink-0 text-sm font-semibold text-zinc-200">
-                        ${h.price_per_night}
-                        <span className="text-xs font-normal text-zinc-500">/night</span>
-                      </span>
-                    </Link>
+                      {(h.reference || h.phone) && (
+                        <p className="mt-1 flex flex-wrap items-center gap-x-2 text-[11px] text-zinc-500">
+                          {h.reference && <span>Ref #{h.reference}</span>}
+                          {h.reference && h.phone && <span aria-hidden>·</span>}
+                          {h.phone && (
+                            <a
+                              href={`tel:${h.phone}`}
+                              className="hover:text-zinc-300"
+                              title="Call the hotel"
+                            >
+                              {h.phone}
+                            </a>
+                          )}
+                        </p>
+                      )}
+                      <Link
+                        href={`/hotels/${h.id}`}
+                        className="mt-2 flex items-center justify-center rounded bg-white px-3 py-1.5 text-xs font-semibold text-black transition-colors hover:bg-zinc-200"
+                      >
+                        View &amp; Book
+                      </Link>
+                    </div>
                   ))}
                 </div>
               )}

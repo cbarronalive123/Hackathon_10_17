@@ -29,7 +29,8 @@ StayLine closes that gap with a phone enrichment layer:
 4. **google** — optional Google Places lookup (`GOOGLE_PLACES_API_KEY`)
 
 Every search result carries `phone` + `phone_source` so you always know where the number
-came from.
+came from. Chain reservation lines (real toll-free numbers) are only matched when
+`ALLOW_CHAIN_DIALING=true`; successful Google lookups are cached per hotel in SQLite.
 
 ## Architecture
 
@@ -67,9 +68,13 @@ Call flow:
 
 | Mode | Dials | Who answers | Use |
 |---|---|---|---|
-| `real` | the hotel's enriched phone number | real front desk | production demo (verify numbers first) |
+| `real` | the hotel's phone number — **only a verified source** (`manual` or `google`) | real front desk | production demo |
 | `test` | `TEST_PHONE` (your cell) | you role-play the front desk | hear the agent live, cheap |
 | `sim` | `TWILIO_SIM_NUMBER` (2nd Twilio number) | a second ElevenLabs agent playing front desk | full agent-to-agent demo |
+
+`real` mode refuses to dial directory/chain numbers or anything unverified — set the number
+explicitly (`PUT /api/hotels/{id}/phone` or the dashboard's "set phone" box) or configure
+Google Places first. The default mode is `sim`.
 
 `sim` mode turns two ElevenLabs agents loose on a Twilio leg each — the booker negotiates
 with an AI receptionist that has rooms, rates and issues `SIM-XXXXXX` confirmations. Great
@@ -94,6 +99,9 @@ Fill in `.env`:
 - `TWILIO_SIM_NUMBER` (optional, for `sim` mode), `TEST_PHONE` (optional, for `test` mode)
 - `PUBLIC_URL` — your public HTTPS URL (see below)
 - `GOOGLE_PLACES_API_KEY` — optional, enables automatic hotel phone lookup
+- `API_SECRET` — optional, locks mutating `/api/*` routes behind an `X-Api-Key` header
+
+`WEBHOOK_SECRET` is generated automatically into `.env` on first run — no need to set it.
 
 Create the agents (writes their IDs back into `.env`):
 
@@ -121,6 +129,30 @@ Run:
 ```bash
 python run.py             # http://127.0.0.1:8010
 ```
+
+## Desktop test console (PyQt6)
+
+`gui.py` is a PyQt6 app for testing the phone agent against your own phone:
+
+```bash
+python gui.py
+```
+
+- **Dialer** — type or keypad your number, press **CALL MY PHONE**, and the
+  ElevenLabs agent calls you. You answer and role-play the front desk.
+- **Booking scenario** — the hotel, suite, dates, and rate the agent will ask for
+  (defaults match `CALL_SCRIPT.md`).
+- **Guest profile** — the name/email/phone the agent gives the hotel.
+- **Live call monitor** — status, transcript, and the reservation details the agent
+  captures (confirmation #, dates, suite, total, cancellation, outcome).
+
+Local requests (the GUI talks to `127.0.0.1`) may dial any test number; the public
+ngrok tunnel cannot — it falls back to `TEST_PHONE` from `.env`.
+
+**Role-play script:** read [`CALL_SCRIPT.md`](CALL_SCRIPT.md) while you answer —
+it contains every line and number to give the agent (reference `GM-7QK482`,
+Deluxe King Suite, $658.92 total, hold until 6 PM, cancellation terms) and what
+to verify in the GUI afterward.
 
 ## Using the dashboard
 
@@ -164,12 +196,30 @@ booking-context ↔ prompt variable coverage (so the agent never gets an empty `
 the SQLite store lifecycle, TwiML/AMD helpers, and liteAPI response parsing against the real
 fixtures in `../hotel_api/tests/responses/`.
 
+## Security model
+
+- **Twilio webhooks** (`/twilio/*`) verify `X-Twilio-Signature` with the auth token or API
+  key secret; unsigned requests are rejected with 403.
+- **Tool and post-call webhooks** (`/tools/*`, `/webhooks/elevenlabs/post-call`) require the
+  `X-Webhook-Secret` header. The secret is **auto-generated into `.env` on first run**;
+  agents created by `scripts/setup_agents.py` send it automatically. If you wire the
+  ElevenLabs post-call webhook manually, add the same header to its request headers.
+- **`API_SECRET` (optional)** — when set, all mutating `/api/*` routes require an
+  `X-Api-Key` header (enter it in the dashboard header input).
+- `POST /api/calls` never dials an arbitrary number: real mode only dials the selected
+  hotel's verified number, and `real`/`test`/`sim` targets come from `.env`.
+- Recording URLs are validated (`https://` on a `twilio.com` host) before being stored or
+  rendered, blocking `javascript:` link injection.
+- The public tunnel still exposes `GET /api/*` (dashboard data) by design; for anything
+  beyond a demo, run `ngrok http --basic-auth user:pass 8010` or set `API_SECRET`.
+
 ## Safety notes
 
 - The agent always discloses it is an automated assistant calling on behalf of a guest.
 - It never reads out card numbers; payment is handled per the profile's payment note
   (default: card at check-in).
-- `data/hotel_phones.json` ships 555-style placeholder numbers — replace with verified real
-  numbers (or configure Google Places) before using `real` mode.
+- `data/hotel_phones.json` ships 555-style placeholder numbers and chain lines are gated
+  off by default — `real` mode only dials numbers you set yourself or Google verifies.
 - `RECORD_CALLS=true` enables Twilio recording; recordings are stored on the call record.
-- Set `WEBHOOK_SECRET` to require `X-Webhook-Secret` on tool webhooks.
+- The voice webhook is idempotent: a Twilio retry reuses the stored TwiML instead of
+  creating a second ElevenLabs conversation.

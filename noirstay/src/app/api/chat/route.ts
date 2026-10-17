@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
-import { searchLiveHotels, type LiveHotelRow } from "@/lib/liteapi";
+import { searchLiveHotels, getHotelContact, type LiveHotelRow } from "@/lib/liteapi";
 import { isoInDays } from "@/lib/dates";
 
 export const dynamic = "force-dynamic";
@@ -87,7 +87,7 @@ type SearchIntent = {
   adults: number;
 };
 
-function parseIntent(raw: string, history: ChatMsg[], message: string): SearchIntent {
+function parseIntent(raw: string): SearchIntent {
   const fallback: SearchIntent = {
     search: false,
     cityName: "",
@@ -96,8 +96,6 @@ function parseIntent(raw: string, history: ChatMsg[], message: string): SearchIn
     checkout: isoInDays(32),
     adults: 2,
   };
-  void history;
-  void message;
 
   const cleaned = raw.replace(/```json|```/g, "").trim();
   const first = cleaned.indexOf("{");
@@ -115,7 +113,7 @@ function parseIntent(raw: string, history: ChatMsg[], message: string): SearchIn
   for (const c of candidates) {
     try {
       const obj = JSON.parse(c) as Partial<SearchIntent>;
-      if (typeof obj === "object" && obj !== null) {
+      if (typeof obj === "object" && obj !== null && obj.search && obj.cityName) {
         parsed = obj;
         break;
       }
@@ -123,7 +121,7 @@ function parseIntent(raw: string, history: ChatMsg[], message: string): SearchIn
       // try next candidate
     }
   }
-  if (!parsed || !parsed.search || !parsed.cityName) return fallback;
+  if (!parsed) return fallback;
 
   const checkin = /^\d{4}-\d{2}-\d{2}$/.test(String(parsed.checkin)) ? String(parsed.checkin) : fallback.checkin;
   let checkout = /^\d{4}-\d{2}-\d{2}$/.test(String(parsed.checkout)) ? String(parsed.checkout) : fallback.checkout;
@@ -185,7 +183,7 @@ Rules: keep dates and guest counts the traveler gave earlier in the conversation
       return { content: "", reasoning: "" };
     });
 
-    const intent = parseIntent(intentOut.content || intentOut.reasoning, pastMsgs, message);
+    const intent = parseIntent(intentOut.content || intentOut.reasoning);
 
     // Step 2: live search when we have a destination; fall back to the seeded catalog on failure.
     let liveHotels: LiveHotelRow[] = [];
@@ -248,6 +246,17 @@ Rules: keep dates and guest counts the traveler gave earlier in the conversation
     const replyOut = await llm(messages, { maxTokens: 900, temperature: 0.6 });
     let reply = replyOut.content;
     if (!reply) {
+      // The reasoning model can exhaust the token budget in reasoning; retry
+      // once with a larger budget before giving up (mirrors the intent path).
+      const retryOut = await llm(messages, { maxTokens: 2000, temperature: 0.6 }).catch(
+        (err): { content: string; reasoning: string } => {
+          console.error("reply retry failed", err);
+          return { content: "", reasoning: "" };
+        }
+      );
+      reply = retryOut.content || retryOut.reasoning;
+    }
+    if (!reply) {
       throw new Error("Empty reply from model");
     }
 
@@ -266,9 +275,35 @@ Rules: keep dates and guest counts the traveler gave earlier in the conversation
     let recommended: unknown[] = [];
     if (hotelIds.length) {
       recommended = await query(
-        `SELECT id, name, city, country, star_rating, guest_rating, price_per_night, image_url, amenities
+        `SELECT id, name, city, country, star_rating, guest_rating, price_per_night,
+           image_url, amenities, provider_hotel_id AS reference, phone
          FROM hotels WHERE id = ANY($1)`,
         [hotelIds]
+      );
+
+      // Enrich recommended live hotels with contact details (cached in the DB
+      // after the first fetch, so this only costs ~200ms on first mention).
+      await Promise.all(
+        recommended.map(async (h) => {
+          const hotel = h as {
+            id: number;
+            reference: string | null;
+            phone: string | null;
+            email?: string | null;
+          };
+          if (!hotel.reference || (hotel.phone && hotel.email)) return;
+          const contact = await getHotelContact(hotel.reference).catch(
+            () => ({}) as { phone?: string; email?: string }
+          );
+          if (contact?.phone || contact?.email) {
+            if (contact.phone) hotel.phone = contact.phone;
+            if (contact.email) hotel.email = contact.email;
+            await query(
+              "UPDATE hotels SET phone = COALESCE($1, phone), email = COALESCE($2, email) WHERE id = $3",
+              [contact.phone ?? null, contact.email ?? null, hotel.id]
+            ).catch(() => {});
+          }
+        })
       );
     }
 

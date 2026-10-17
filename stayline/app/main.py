@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
@@ -33,7 +34,14 @@ if settings.liteapi_key:
 if settings.elevenlabs_api_key:
     el = ElevenLabsClient(settings.elevenlabs_api_key, settings.elevenlabs_base)
 tw = TwilioService(settings)
-phonebook = PhoneBook(store, PHONE_DIRECTORY_FILE, settings.google_places_api_key)
+phonebook = PhoneBook(
+    store,
+    PHONE_DIRECTORY_FILE,
+    settings.google_places_api_key,
+    allow_chains=settings.allow_chain_dialing,
+)
+
+MAX_LINK_ATTEMPTS = 10
 
 
 class ProfileUpdate(BaseModel):
@@ -55,8 +63,8 @@ class PhoneUpdate(BaseModel):
 class CallRequest(BaseModel):
     hotel_id: str | None = None
     offer: dict[str, Any] | None = None
-    to_number: str | None = None
     mode: str | None = None
+    to_number: str | None = None
 
 
 class OnlineBookingRequest(BaseModel):
@@ -74,6 +82,50 @@ def _parse_iso(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _is_local(client_host: str, url_hostname: str) -> bool:
+    return (client_host or "").lower() in LOCAL_HOSTS and (url_hostname or "").lower() in LOCAL_HOSTS
+
+
+def _is_local_request(request: Request) -> bool:
+    client = request.client.host if request.client else ""
+    try:
+        hostname = request.url.hostname or ""
+    except Exception:
+        hostname = ""
+    return _is_local(client, hostname)
+
+
+def _require_api_auth(request: Request) -> None:
+    if settings.api_secret and request.headers.get("X-Api-Key") != settings.api_secret:
+        raise HTTPException(401, "invalid or missing X-Api-Key header")
+
+
+def _check_webhook_secret(request: Request) -> None:
+    if request.headers.get("X-Webhook-Secret") != settings.webhook_secret:
+        raise HTTPException(401, "invalid or missing X-Webhook-Secret header")
+
+
+async def _validated_twilio_form(request: Request) -> dict[str, str]:
+    form = await request.form()
+    params = {k: str(v) for k, v in form.items()}
+    signature = request.headers.get("X-Twilio-Signature")
+    if not tw.validate_signature(str(request.url), params, signature):
+        log.warning("rejected unverified Twilio request to %s", request.url.path)
+        raise HTTPException(403, "invalid Twilio signature")
+    return params
+
+
+def _valid_recording_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and parsed.netloc.endswith("twilio.com")
 
 
 def _conversation_dynamic_call_id(detail: dict[str, Any]) -> str | None:
@@ -127,17 +179,18 @@ def store_conversation(call: dict[str, Any], detail: dict[str, Any]) -> None:
         merge_tool_events(merged)
 
 
-def try_link_conversation(call: dict[str, Any]) -> None:
+def try_link_conversation(
+    call: dict[str, Any], conversations: list[dict[str, Any]] | None = None
+) -> None:
     if not el or not settings.booker_agent_id:
         return
-    created = _parse_iso(call.get("created_at"))
-    if not created:
-        created = datetime.now(timezone.utc) - timedelta(minutes=10)
-    try:
-        conversations = el.list_conversations(settings.booker_agent_id, page_size=25)
-    except ElevenLabsError as exc:
-        log.warning("conversation list failed: %s", exc)
-        return
+    if conversations is None:
+        try:
+            conversations = el.list_conversations(settings.booker_agent_id, page_size=25)
+        except ElevenLabsError as exc:
+            log.warning("conversation list failed: %s", exc)
+            return
+    linked = False
     for item in conversations[:10]:
         conv_id = item.get("conversation_id") or item.get("id")
         if not conv_id:
@@ -155,13 +208,18 @@ def try_link_conversation(call: dict[str, Any]) -> None:
                 if updated:
                     merge_tool_events(updated)
             if call.get("mode") == "sim" and settings.frontdesk_agent_id:
-                _attach_peer_transcript(int(call["id"]), created)
-            return
+                _attach_peer_transcript(int(call["id"]))
+            linked = True
+            break
+    if not linked:
+        store.bump_link_attempts(int(call["id"]))
 
 
-def _attach_peer_transcript(call_id: int, created: datetime) -> None:
+def _attach_peer_transcript(call_id: int, created: datetime | None = None) -> None:
     if not el or not settings.frontdesk_agent_id:
         return
+    call = store.get_call(call_id)
+    created = created or _parse_iso(call.get("created_at")) or datetime.now(timezone.utc)
     try:
         conversations = el.list_conversations(settings.frontdesk_agent_id, page_size=10)
     except ElevenLabsError:
@@ -189,7 +247,22 @@ def _attach_peer_transcript(call_id: int, created: datetime) -> None:
 
 
 def poll_once() -> None:
-    for call in store.active_calls():
+    calls = store.active_calls()
+    need_link = [
+        c
+        for c in calls
+        if not c.get("conversation_id")
+        and c.get("status") in ("in_progress", "completed")
+        and (c.get("link_attempts") or 0) < MAX_LINK_ATTEMPTS
+    ]
+    conversations: list[dict[str, Any]] | None = None
+    if need_link and el and settings.booker_agent_id:
+        try:
+            conversations = el.list_conversations(settings.booker_agent_id, page_size=25)
+        except ElevenLabsError as exc:
+            log.warning("conversation list failed: %s", exc)
+
+    for call in calls:
         call_id = int(call["id"])
         status = call.get("status")
         if call.get("twilio_sid") and status in ("queued", "ringing", "in_progress"):
@@ -201,8 +274,12 @@ def poll_once() -> None:
                     status = mapped
             except Exception as exc:
                 log.warning("twilio fetch failed for call %s: %s", call_id, exc)
-        if not call.get("conversation_id") and status in ("in_progress", "completed"):
-            try_link_conversation(call)
+        if (
+            not call.get("conversation_id")
+            and status in ("in_progress", "completed")
+            and (call.get("link_attempts") or 0) < MAX_LINK_ATTEMPTS
+        ):
+            try_link_conversation(call, conversations)
         elif call.get("conversation_id") and not call.get("transcript"):
             if not el:
                 continue
@@ -231,7 +308,7 @@ async def lifespan(_: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="StayLine", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="StayLine", version="1.1.0", lifespan=lifespan)
 
 
 @app.get("/api/health")
@@ -251,6 +328,7 @@ async def health() -> dict[str, Any]:
         "google_places": bool(settings.google_places_api_key),
         "default_mode": settings.call_mode,
         "modes_available": modes,
+        "api_auth": bool(settings.api_secret),
     }
 
 
@@ -267,7 +345,12 @@ async def search_hotels(
         raise HTTPException(503, "LITEAPI_KEY not configured")
     if not checkin or not checkout:
         checkin, checkout = default_dates()
-    if nights_between(checkin, checkout) < 1:
+    try:
+        ci = date.fromisoformat(checkin)
+        co = date.fromisoformat(checkout)
+    except ValueError:
+        raise HTTPException(400, "checkin and checkout must be YYYY-MM-DD")
+    if co <= ci:
         raise HTTPException(400, "checkout must be after checkin")
     try:
         results = await asyncio.to_thread(
@@ -288,7 +371,8 @@ async def search_hotels(
 
 
 @app.put("/api/hotels/{hotel_id}/phone")
-async def set_phone(hotel_id: str, body: PhoneUpdate) -> dict[str, Any]:
+async def set_phone(hotel_id: str, body: PhoneUpdate, request: Request) -> dict[str, Any]:
+    _require_api_auth(request)
     normalized = normalize_phone(body.phone)
     if not normalized:
         raise HTTPException(400, "could not parse that phone number, use E.164 like +12125550123")
@@ -302,13 +386,15 @@ async def get_profile() -> dict[str, Any]:
 
 
 @app.put("/api/profile")
-async def put_profile(body: ProfileUpdate) -> dict[str, Any]:
+async def put_profile(body: ProfileUpdate, request: Request) -> dict[str, Any]:
+    _require_api_auth(request)
     data = {k: v for k, v in body.model_dump().items() if v is not None}
     return store.set_profile(data)
 
 
 @app.post("/api/calls")
-async def place_call(body: CallRequest) -> dict[str, Any]:
+async def place_call(body: CallRequest, request: Request) -> dict[str, Any]:
+    _require_api_auth(request)
     mode = (body.mode or settings.call_mode).lower()
     if mode not in ("real", "test", "sim"):
         raise HTTPException(400, "mode must be one of real, test, sim")
@@ -330,20 +416,37 @@ async def place_call(body: CallRequest) -> dict[str, Any]:
     if not hotel_name:
         raise HTTPException(400, "offer is required: search hotels first and pass the selected result")
 
+    profile = store.get_profile()
+    if not str(profile.get("guest_name") or "").strip():
+        raise HTTPException(400, "guest profile is empty: save a guest name first (PUT /api/profile)")
+
     if mode == "test":
-        to_number = settings.test_phone
+        to_number = None
+        if body.to_number and _is_local_request(request):
+            to_number = normalize_phone(body.to_number)
+            if not to_number:
+                raise HTTPException(400, "could not parse the dialed phone number")
+        if not to_number:
+            to_number = settings.test_phone
+        if not to_number:
+            raise HTTPException(
+                400,
+                "no test number: dial one in the desktop GUI (local requests only) "
+                "or set TEST_PHONE in .env",
+            )
     elif mode == "sim":
         to_number = settings.twilio_sim_number
     else:
-        to_number = normalize_phone(body.to_number or offer.get("phone"))
+        if offer.get("phone_source") not in ("manual", "google"):
+            raise HTTPException(
+                400,
+                "real mode requires a verified phone number: set one with "
+                "PUT /api/hotels/{id}/phone or configure GOOGLE_PLACES_API_KEY",
+            )
+        to_number = normalize_phone(offer.get("phone"))
     if not to_number:
-        raise HTTPException(
-            400,
-            "no phone number for this hotel: set one with PUT /api/hotels/{id}/phone "
-            "or configure GOOGLE_PLACES_API_KEY",
-        )
+        raise HTTPException(400, "no phone number resolved for this hotel")
 
-    profile = store.get_profile()
     context = build_booking_context("pending", mode, profile, offer, to_number)
     call_id = store.create_call(
         mode=mode,
@@ -386,11 +489,24 @@ async def get_call(call_id: int) -> dict[str, Any]:
     call = store.get_call(call_id)
     if not call:
         raise HTTPException(404, "call not found")
+    if (
+        call.get("status") == "completed"
+        and not call.get("conversation_id")
+        and el
+        and settings.booker_agent_id
+        and (call.get("link_attempts") or 0) < MAX_LINK_ATTEMPTS
+    ):
+        try:
+            await asyncio.to_thread(try_link_conversation, call)
+            call = store.get_call(call_id) or call
+        except Exception:
+            pass
     return call
 
 
 @app.post("/api/calls/{call_id}/hangup")
-async def hangup_call(call_id: int) -> dict[str, Any]:
+async def hangup_call(call_id: int, request: Request) -> dict[str, Any]:
+    _require_api_auth(request)
     call = store.get_call(call_id)
     if not call:
         raise HTTPException(404, "call not found")
@@ -404,7 +520,8 @@ async def hangup_call(call_id: int) -> dict[str, Any]:
 
 
 @app.post("/api/bookings/online")
-async def book_online(body: OnlineBookingRequest) -> dict[str, Any]:
+async def book_online(body: OnlineBookingRequest, request: Request) -> dict[str, Any]:
+    _require_api_auth(request)
     if not lite:
         raise HTTPException(503, "LITEAPI_KEY not configured")
     profile = store.get_profile()
@@ -456,10 +573,15 @@ async def list_bookings() -> dict[str, Any]:
 
 @app.post("/twilio/voice/{call_id}")
 async def twilio_voice(call_id: int, request: Request) -> Response:
-    form = await request.form()
+    try:
+        form = await _validated_twilio_form(request)
+    except HTTPException:
+        return Response(twiml_mod.hangup_twiml(), media_type="application/xml", status_code=403)
     call = store.get_call(call_id)
     if not call:
         return Response(twiml_mod.hangup_twiml(), media_type="application/xml")
+    if call.get("voice_twiml"):
+        return Response(content=call["voice_twiml"], media_type="application/xml")
     answered_by = form.get("AnsweredBy")
     if call.get("mode") == "real" and twiml_mod.is_machine(answered_by):
         store.update_call(
@@ -485,12 +607,16 @@ async def twilio_voice(call_id: int, request: Request) -> Response:
         log.error("register-call failed for call %s: %s", call_id, exc)
         store.update_call(call_id, status="failed", error=f"ElevenLabs register-call failed: {exc}")
         return Response(twiml_mod.hangup_twiml(), media_type="application/xml")
+    store.update_call(call_id, voice_twiml=twiml_text)
     return Response(content=twiml_text, media_type="application/xml")
 
 
 @app.post("/twilio/voice/frontdesk")
 async def twilio_voice_frontdesk(request: Request) -> Response:
-    form = await request.form()
+    try:
+        form = await _validated_twilio_form(request)
+    except HTTPException:
+        return Response(twiml_mod.hangup_twiml(), media_type="application/xml", status_code=403)
     if not el or not settings.frontdesk_agent_id:
         return Response(twiml_mod.hangup_twiml(), media_type="application/xml")
     sim_call = store.latest_sim_call()
@@ -514,7 +640,12 @@ async def twilio_voice_frontdesk(request: Request) -> Response:
 
 @app.post("/twilio/status/{call_id}")
 async def twilio_status(call_id: int, request: Request) -> Response:
-    form = await request.form()
+    try:
+        form = await _validated_twilio_form(request)
+    except HTTPException:
+        return Response(
+            content="<?xml version='1.0'?><Response/>", media_type="application/xml", status_code=403
+        )
     mapped = twiml_mod.map_twilio_status(form.get("CallStatus"))
     if mapped:
         store.update_call(call_id, status=mapped)
@@ -523,17 +654,18 @@ async def twilio_status(call_id: int, request: Request) -> Response:
 
 @app.post("/twilio/recording/{call_id}")
 async def twilio_recording(call_id: int, request: Request) -> Response:
-    form = await request.form()
-    url = form.get("RecordingUrl")
-    if url:
+    try:
+        form = await _validated_twilio_form(request)
+    except HTTPException:
+        return Response(
+            content="<?xml version='1.0'?><Response/>", media_type="application/xml", status_code=403
+        )
+    url = form.get("RecordingUrl", "")
+    if url and _valid_recording_url(url):
         store.update_call(call_id, recording_url=f"{url}.mp3")
+    elif url:
+        log.warning("rejected recording URL for call %s: %s", call_id, url)
     return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
-
-
-def _check_webhook_secret(request: Request) -> None:
-    if settings.webhook_secret:
-        if request.headers.get("X-Webhook-Secret") != settings.webhook_secret:
-            raise HTTPException(401, "invalid webhook secret")
 
 
 async def _handle_tool(request: Request, tool_name: str) -> dict[str, Any]:
@@ -573,6 +705,7 @@ async def tool_report_outcome(request: Request) -> dict[str, Any]:
 
 @app.post("/webhooks/elevenlabs/post-call")
 async def elevenlabs_post_call(request: Request) -> dict[str, Any]:
+    _check_webhook_secret(request)
     try:
         payload = await request.json()
     except Exception:
@@ -584,8 +717,8 @@ async def elevenlabs_post_call(request: Request) -> dict[str, Any]:
     dynamic = (data.get("conversation_initiation_client_data") or {}).get("dynamic_variables") or {}
     call_id = dynamic.get("call_id")
     call = None
-    if call_id:
-        call = store.get_call(int(call_id)) if str(call_id).isdigit() else None
+    if call_id and str(call_id).isdigit():
+        call = store.get_call(int(call_id))
     if not call and conversation_id:
         for candidate in store.list_calls(limit=50):
             if candidate.get("conversation_id") == conversation_id:
@@ -596,7 +729,7 @@ async def elevenlabs_post_call(request: Request) -> dict[str, Any]:
     if not call.get("conversation_id") and conversation_id:
         store.update_call(int(call["id"]), conversation_id=conversation_id)
         call = store.get_call(int(call["id"]))
-    if call and not call.get("transcript"):
+    if call and not call.get("transcript") and data.get("status") == "done":
         store_conversation(call, data)
     return {"ok": True}
 

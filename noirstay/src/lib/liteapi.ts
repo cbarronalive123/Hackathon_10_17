@@ -188,3 +188,32 @@ export async function searchLiveHotels(s: LiveSearch): Promise<LiveHotelRow[]> {
   rows.sort((a, b) => a.price_per_night - b.price_per_night);
   return rows;
 }
+
+/**
+ * Fetch a hotel's contact details (phone/email) from the static hotel-data
+ * endpoint. Cheap (~100-300ms), so it is fine for the recommended few.
+ */
+export async function getHotelContact(
+  hotelId: string
+): Promise<{ phone?: string; email?: string }> {
+  const key = process.env.LITEAPI_KEY;
+  if (!key) return {};
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch(
+      `${LITEAPI_BASE}/data/hotel?hotelId=${encodeURIComponent(hotelId)}`,
+      { headers: { "X-API-Key": key }, signal: controller.signal }
+    );
+    if (!res.ok) return {};
+    const data = ((await res.json()) as { data?: Record<string, unknown> })?.data ?? {};
+    return {
+      phone: typeof data.phone === "string" && data.phone ? data.phone : undefined,
+      email: typeof data.email === "string" && data.email ? data.email : undefined,
+    };
+  } catch {
+    return {};
+  } finally {
+    clearTimeout(timer);
+  }
+}

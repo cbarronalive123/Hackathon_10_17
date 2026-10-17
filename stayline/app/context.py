@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import re
 from datetime import date
 from typing import Any
-
-VAR_PATTERN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 
 
 def nights_between(checkin: str, checkout: str) -> int:
@@ -78,10 +75,6 @@ def frontdesk_context(booking_context: dict[str, Any] | None) -> dict[str, str]:
         "checkin": str(ctx.get("checkin") or "N/A"),
         "checkout": str(ctx.get("checkout") or "N/A"),
     }
-
-
-def prompt_variables(prompt: str) -> set[str]:
-    return set(VAR_PATTERN.findall(prompt))
 
 
 def default_dates(days_ahead: int = 30, nights: int = 2) -> tuple[str, str]:

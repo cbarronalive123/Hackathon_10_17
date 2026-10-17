@@ -64,7 +64,7 @@ def find_chain_line(directory: dict[str, Any], name: str) -> str | None:
 def places_phone_from_payload(payload: dict[str, Any]) -> str | None:
     places = payload.get("places") or []
     for place in places:
-        number = place.get("nationalPhoneNumber") or place.get("internationalPhoneNumber")
+        number = place.get("internationalPhoneNumber") or place.get("nationalPhoneNumber")
         if number:
             return number
     return None
@@ -76,40 +76,49 @@ class PhoneBook:
         store: Store,
         directory_path: Path | str,
         google_api_key: str = "",
+        allow_chains: bool = False,
     ):
         self.store = store
         self.directory = load_directory(directory_path)
         self.google_api_key = google_api_key
+        self.allow_chains = allow_chains
+        self._http = httpx.Client(timeout=8)
 
     def resolve(self, hotel_id: str | None, name: str, city: str = "") -> tuple[str | None, str]:
         if hotel_id:
             override = self.store.get_phone_override(hotel_id)
             if override:
                 return normalize_phone(override), "manual"
+            cached = self.store.get_cached_phone(hotel_id)
+            if cached:
+                return normalize_phone(cached[0]), cached[1]
         phone = find_directory_phone(self.directory, name, city)
         if phone:
             return normalize_phone(phone), "directory"
-        phone = find_chain_line(self.directory, name)
-        if phone:
-            return normalize_phone(phone), "chain"
+        if self.allow_chains:
+            phone = find_chain_line(self.directory, name)
+            if phone:
+                return normalize_phone(phone), "chain"
         if self.google_api_key:
             phone = self._google_places_lookup(name, city)
             if phone:
-                return normalize_phone(phone), "google"
+                normalized = normalize_phone(phone)
+                if normalized and hotel_id:
+                    self.store.cache_phone(hotel_id, normalized, "google")
+                return normalized, "google"
         return None, "none"
 
     def _google_places_lookup(self, name: str, city: str) -> str | None:
         query = ", ".join(p for p in (name, city, "hotel") if p)
         try:
-            resp = httpx.post(
+            resp = self._http.post(
                 "https://places.googleapis.com/v1/places:searchText",
                 headers={
                     "X-Goog-Api-Key": self.google_api_key,
-                    "X-Goog-FieldMask": "places.displayName,places.nationalPhoneNumber,places.formattedAddress",
+                    "X-Goog-FieldMask": "places.displayName,places.nationalPhoneNumber,places.internationalPhoneNumber,places.formattedAddress",
                     "Content-Type": "application/json",
                 },
                 json={"textQuery": query},
-                timeout=15,
             )
             if resp.status_code >= 400:
                 return None

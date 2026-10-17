@@ -1,4 +1,4 @@
-const state = { health: {}, calls: [], bookings: [], mode: null, pollTimer: null };
+﻿const state = { health: {}, calls: [], bookings: [], mode: null, pollTimer: null };
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -11,6 +11,8 @@ function esc(value) {
 async function api(path, options = {}) {
   const opts = { headers: { "Content-Type": "application/json" }, ...options };
   if (opts.body && typeof opts.body !== "string") opts.body = JSON.stringify(opts.body);
+  const apiKey = localStorage.getItem("stayline_api_key");
+  if (apiKey) opts.headers["X-Api-Key"] = apiKey;
   const res = await fetch(path, opts);
   let data = {};
   try { data = await res.json(); } catch { data = {}; }
@@ -27,7 +29,7 @@ function toast(message) {
 }
 
 function money(amount, currency) {
-  if (amount === null || amount === undefined) return "—";
+  if (amount === null || amount === undefined) return "â€”";
   return `${currency === "USD" ? "$" : (currency || "") + " "}${Number(amount).toFixed(2)}`;
 }
 
@@ -50,8 +52,13 @@ async function loadHealth() {
     ["Places lookup", h.google_places],
   ];
   $("#health-chips").innerHTML = chips.map(([label, ok]) =>
-    `<span class="chip ${ok ? "ok" : "bad"}">${label} ${ok ? "✓" : "✗"}</span>`
+    `<span class="chip ${ok ? "ok" : "bad"}">${label} ${ok ? "âœ“" : "âœ—"}</span>`
   ).join("");
+  const keyInput = $("#api-key");
+  if (h.api_auth) {
+    keyInput.classList.remove("hidden");
+    keyInput.value = localStorage.getItem("stayline_api_key") || "";
+  }
   const mode = h.default_mode || "real";
   $("#call-mode").value = mode;
   state.mode = mode;
@@ -62,8 +69,8 @@ function renderModeHint() {
   const h = state.health;
   const modes = h.modes_available || {};
   const notes = {
-    real: "Dials the hotel's real phone number. Verify numbers in data/hotel_phones.json or set GOOGLE_PLACES_API_KEY.",
-    test: `Dials your TEST_PHONE (${h.test_phone ? "set" : "not set"}) — you answer and role-play the front desk.`,
+    real: "Dials the hotel's real phone number — only a verified source (manual or Google).",
+    test: `Dials TEST_PHONE (${h.test_phone ? "set" : "not set"}) or the number dialed in the desktop GUI — you answer and role-play the front desk.`,
     sim: `Dials TWILIO_SIM_NUMBER (${h.sim_number ? "set" : "not set"}) — an AI front-desk agent answers. Point that number's voice webhook at POST {PUBLIC_URL}/twilio/voice/frontdesk.`,
   };
   const available = modes[state.mode];
@@ -83,7 +90,7 @@ async function searchHotels(event) {
   event.preventDefault();
   const form = $("#search-form");
   const status = $("#search-status");
-  status.textContent = "Searching live rates…";
+  status.textContent = "Searching live ratesâ€¦";
   try {
     const params = new URLSearchParams(new FormData(form));
     const data = await api(`/api/hotels?${params}`);
@@ -110,11 +117,11 @@ function renderResults(results) {
       ${r.photo ? `<img src="${esc(r.photo)}" alt="" onerror="this.style.visibility='hidden'">` : ""}
       <div class="info">
         <div class="name">${esc(r.name)}</div>
-        <div class="meta">${"★".repeat(Math.round(r.stars || 0))} ${esc(r.rating ?? "–")}/10 · ${esc(r.review_count ?? 0)} reviews · ${esc(r.address)}, ${esc(r.city)}</div>
+        <div class="meta">${"â˜…".repeat(Math.round(r.stars || 0))} ${esc(r.rating ?? "â€“")}/10 Â· ${esc(r.review_count ?? 0)} reviews Â· ${esc(r.address)}, ${esc(r.city)}</div>
         <div class="tags">
           <span class="tag">${esc(r.room_name || "room")}</span>
           <span class="tag">${esc(r.board || "RO")}</span>
-          <span class="tag ${esc((r.refundable || "").toLowerCase())}">${r.refundable === "RFN" ? "refundable" : (r.refundable === "NRFN" ? "non-refundable" : "—")}</span>
+          <span class="tag ${esc((r.refundable || "").toLowerCase())}">${r.refundable === "RFN" ? "refundable" : (r.refundable === "NRFN" ? "non-refundable" : "â€”")}</span>
           ${r.max_occupancy ? `<span class="tag">sleeps ${esc(r.max_occupancy)}</span>` : ""}
         </div>
         <div class="phone-row">${phone}
@@ -124,7 +131,7 @@ function renderResults(results) {
       </div>
       <div class="price">
         <div class="total">${money(r.total, r.currency)}</div>
-        <div class="per">${money(r.per_night, r.currency)}/night · ${esc(r.nights)}n</div>
+        <div class="per">${money(r.per_night, r.currency)}/night Â· ${esc(r.nights)}n</div>
       </div>
       <div class="actions">
         <button class="primary small" onclick="placeCall(this)">Call to book</button>
@@ -170,7 +177,7 @@ async function saveProfile(event) {
   const body = Object.fromEntries(new FormData(form));
   try {
     await api("/api/profile", { method: "PUT", body });
-    $("#profile-status").textContent = "Profile saved ✓";
+    $("#profile-status").textContent = "Profile saved âœ“";
     setTimeout(() => ($("#profile-status").textContent = ""), 2500);
   } catch (err) {
     toast(err.message);
@@ -189,7 +196,7 @@ async function placeCall(button) {
       body: { hotel_id: hotelId, offer, mode: state.mode },
     });
     toast(`Call #${call.id} placed to ${call.to_number}`);
-    await pollCalls(true);
+    await pollCalls();
   } catch (err) {
     toast(err.message);
   } finally {
@@ -226,7 +233,7 @@ async function bookOnline(button) {
 async function hangupCall(callId) {
   try {
     await api(`/api/calls/${callId}/hangup`, { method: "POST" });
-    await pollCalls(true);
+    await pollCalls();
   } catch (err) {
     toast(err.message);
   }
@@ -260,7 +267,7 @@ function renderCall(call) {
       <span class="badge ${esc(status)}">${esc(status)}</span>
       <span class="badge ${esc(call.mode)}">${esc(call.mode)}</span>
       ${outcome.outcome ? `<span class="badge ${esc(outcome.outcome === "booked" ? "booked" : "")}">${esc(outcome.outcome)}</span>` : ""}
-      <span class="muted">${esc(call.to_number || "")} · ${esc(ctx.checkin || "")} → ${esc(ctx.checkout || "")} · ${esc(ctx.room_type || "")}</span>
+      <span class="muted">${esc(call.to_number || "")} Â· ${esc(ctx.checkin || "")} â†’ ${esc(ctx.checkout || "")} Â· ${esc(ctx.room_type || "")}</span>
       <span class="muted" style="margin-left:auto">${esc((call.created_at || "").replace("T", " ").replace("+00:00", ""))} UTC</span>
     </div>
     ${kvHtml}
@@ -274,13 +281,13 @@ function renderCall(call) {
   </div>`;
 }
 
-async function pollCalls(force) {
+async function pollCalls() {
   try {
     const data = await api("/api/calls");
     state.calls = data.calls || [];
     $("#calls").innerHTML = state.calls.length
       ? state.calls.map(renderCall).join("")
-      : `<div class="muted">No calls yet. Search a hotel and press “Call to book”.</div>`;
+      : `<div class="muted">No calls yet. Search a hotel and press â€œCall to bookâ€.</div>`;
     const anyActive = state.calls.some((c) => ["queued", "ringing", "in_progress"].includes(c.status));
     schedulePolling(anyActive ? 3000 : 15000);
   } catch (err) {
@@ -305,7 +312,7 @@ async function loadBookings() {
         <div class="booking">
           <span class="id">${esc(b.booking_id || b.prebook_id || ("#" + b.id))}</span>
           <span>${esc(b.hotel_name || b.hotel_id || "")}</span>
-          <span>${esc(b.checkin)} → ${esc(b.checkout)}</span>
+          <span>${esc(b.checkin)} â†’ ${esc(b.checkout)}</span>
           <span>${esc(b.guests)} guests</span>
           <span>${money(b.total_amount, b.currency)}</span>
           <span class="badge completed">${esc(b.status || "")}</span>
@@ -327,13 +334,16 @@ async function init() {
     state.mode = e.target.value;
     renderModeHint();
   });
+  $("#api-key").addEventListener("change", (e) => {
+    localStorage.setItem("stayline_api_key", e.target.value.trim());
+  });
   try {
     await loadHealth();
     await loadProfile();
   } catch (err) {
     toast(err.message);
   }
-  await pollCalls(true);
+  await pollCalls();
   await loadBookings();
 }
 

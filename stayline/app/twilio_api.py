@@ -2,30 +2,42 @@ from __future__ import annotations
 
 from typing import Any
 
-from twilio.base.exceptions import TwilioRestException
+from twilio.request_validator import RequestValidator
 from twilio.rest import Client as TwilioRestClient
 
 from .config import Settings
+from .twiml import hangup_twiml
 
 
 class TwilioService:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._client: TwilioRestClient | None = None
+        self._validator: RequestValidator | None = None
         if settings.twilio_account_sid and settings.twilio_api_key_sid and settings.twilio_api_key_secret:
             self._client = TwilioRestClient(
                 settings.twilio_api_key_sid,
                 settings.twilio_api_key_secret,
                 settings.twilio_account_sid,
             )
+            self._validator = RequestValidator(settings.twilio_api_key_secret)
         elif settings.twilio_account_sid and settings.twilio_auth_token:
             self._client = TwilioRestClient(
                 settings.twilio_account_sid, settings.twilio_auth_token
             )
+            self._validator = RequestValidator(settings.twilio_auth_token)
 
     @property
     def ready(self) -> bool:
         return self._client is not None
+
+    def validate_signature(self, url: str, params: dict[str, Any], signature: str | None) -> bool:
+        if not self._validator or not signature:
+            return False
+        try:
+            return self._validator.validate(url, params, signature)
+        except Exception:
+            return False
 
     def create_call(
         self,
@@ -69,13 +81,4 @@ class TwilioService:
         }
 
     def hangup(self, sid: str) -> None:
-        self._client.calls(sid).update(twiml="<Response><Hangup/></Response>")
-
-    def validate(self) -> dict[str, Any]:
-        if not self._client:
-            return {"ok": False, "error": "Twilio credentials not configured"}
-        try:
-            account = self._client.api.account.fetch()
-            return {"ok": True, "friendly_name": account.friendly_name}
-        except TwilioRestException as exc:
-            return {"ok": False, "error": str(exc)}
+        self._client.calls(sid).update(twiml=hangup_twiml())

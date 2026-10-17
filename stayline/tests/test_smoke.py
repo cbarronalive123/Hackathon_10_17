@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -11,11 +12,11 @@ from app.context import (
     default_dates,
     frontdesk_context,
     nights_between,
-    prompt_variables,
 )
 from app.db import Store
 from app.liteapi import LiteAPIClient
 from app.phones import (
+    PhoneBook,
     find_chain_line,
     find_directory_phone,
     load_directory,
@@ -27,6 +28,13 @@ from app.twiml import is_machine, map_twilio_status, hangup_twiml
 
 FIXTURES = Path(__file__).resolve().parents[1].parent / "hotel_api" / "tests" / "responses"
 DIRECTORY = Path(__file__).resolve().parents[1] / "data" / "hotel_phones.json"
+
+VAR_PATTERN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+
+
+def prompt_variables(prompt: str) -> set[str]:
+    return set(VAR_PATTERN.findall(prompt))
+
 
 OFFER = {
     "hotel_id": "lpa5464",
@@ -81,14 +89,34 @@ def test_directory_and_chain_lookup():
     assert find_chain_line(directory, "Moxy NYC Chelsea") is None
 
 
+def test_phonebook_resolution_order_and_chain_gating(tmp_path):
+    book = Store(tmp_path / "pb.db")
+    gated = PhoneBook(book, DIRECTORY)
+    phone, source = gated.resolve("h1", "Hilton Garden Inn NYC Financial Center", "New York")
+    assert phone is None and source == "none"
+    allowed = PhoneBook(book, DIRECTORY, allow_chains=True)
+    phone, source = allowed.resolve("h1", "Hilton Garden Inn NYC Financial Center", "New York")
+    assert phone == "+18004458667" and source == "chain"
+    phone, source = allowed.resolve("h2", "Park Terrace Hotel", "New York")
+    assert phone == "+12125550101" and source == "directory"
+    book.set_phone_override("h2", "+12125550199")
+    phone, source = allowed.resolve("h2", "Park Terrace Hotel", "New York")
+    assert phone == "+12125550199" and source == "manual"
+
+
 def test_places_payload_parsing():
     payload = {
         "places": [
-            {"displayName": {"text": "x"}},
-            {"displayName": {"text": "Park Terrace"}, "nationalPhoneNumber": "(212) 555-0100"},
+            {
+                "displayName": {"text": "Park Terrace"},
+                "nationalPhoneNumber": "020 7946 0958",
+                "internationalPhoneNumber": "+44 20 7946 0958",
+            }
         ]
     }
-    assert places_phone_from_payload(payload) == "(212) 555-0100"
+    assert places_phone_from_payload(payload) == "+44 20 7946 0958"
+    payload2 = {"places": [{"displayName": {"text": "x"}, "nationalPhoneNumber": "(212) 555-0100"}]}
+    assert places_phone_from_payload(payload2) == "(212) 555-0100"
     assert places_phone_from_payload({"places": []}) is None
 
 
@@ -153,6 +181,13 @@ def test_store_roundtrip(tmp_path):
     store.set_phone_override("lpa5464", "+12125550199")
     assert store.get_phone_override("lpa5464") == "+12125550199"
 
+    store.bump_link_attempts(call_id)
+    store.bump_link_attempts(call_id)
+    assert store.get_call(call_id)["link_attempts"] == 2
+
+    store.cache_phone("lp9999", "+12125550188", "google")
+    assert store.get_cached_phone("lp9999") == ("+12125550188", "google")
+
     booking_id = store.add_online_booking({
         "hotel_id": "lpa5464", "hotel_name": "Park Terrace Hotel", "checkin": "2026-12-10",
         "checkout": "2026-12-12", "guests": 2, "prebook_id": "pb-1", "booking_id": "BK-1",
@@ -194,3 +229,64 @@ def test_liteapi_rates_parsing(tmp_path, monkeypatch):
     assert first["checkin"] == "2026-12-10"
     totals = [r["total"] for r in results]
     assert totals == sorted(totals)
+
+
+def test_recording_url_validation():
+    from app.main import _valid_recording_url
+
+    assert _valid_recording_url("https://api.twilio.com/2010-04-01/Accounts/AC1/Recordings/RE1")
+    assert not _valid_recording_url("javascript:alert(1)//")
+    assert not _valid_recording_url("http://api.twilio.com/RE1")
+    assert not _valid_recording_url("https://evil.example.com/RE1")
+
+
+def test_local_request_check():
+    from app.main import _is_local
+
+    assert _is_local("127.0.0.1", "127.0.0.1")
+    assert _is_local("::1", "localhost")
+    assert _is_local("localhost", "127.0.0.1")
+    assert not _is_local("127.0.0.1", "demo.ngrok.app")
+    assert not _is_local("192.168.1.5", "127.0.0.1")
+    assert not _is_local("", "")
+    assert not _is_local("10.0.0.2", "10.0.0.2")
+
+
+def test_api_endpoints():
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    client = TestClient(app)
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    r = client.get("/api/hotels", params={"city": "New York", "checkin": "2026-01-05", "checkout": "2026-01-05"})
+    assert r.status_code == 400
+    assert "after checkin" in r.json()["detail"]
+
+    r = client.get("/api/hotels", params={"city": "New York", "checkin": "bogus", "checkout": "2026-01-05"})
+    assert r.status_code == 400
+
+    r = client.get("/api/calls")
+    assert r.status_code == 200
+    assert "calls" in r.json()
+
+    r = client.post("/tools/record_reservation", json={"total_price": "$1"})
+    assert r.status_code == 401
+
+    from app.main import settings as app_settings
+
+    headers = {"X-Webhook-Secret": app_settings.webhook_secret}
+    r = client.post(
+        "/tools/record_reservation", json={"total_price": "$1"}, headers=headers
+    )
+    assert r.status_code == 200
+
+    r = client.post("/webhooks/elevenlabs/post-call", json={"type": "post_call_transcription", "data": {}})
+    assert r.status_code == 401
+
+    r = client.post("/api/calls", json={"hotel_id": "x", "offer": {"name": "X"}})
+    assert r.status_code == 400
+    assert "PUBLIC_URL" in r.json()["detail"]
