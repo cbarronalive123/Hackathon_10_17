@@ -1,0 +1,17 @@
+# Secrets — never commit
+Spur API.txt
+Twilio api key.txt
+*.env
+.env*
+
+# Editor / tool artifacts
+.vscode/
+.playwright-mcp/
+.idea/
+
+# Personal call recordings (real names/audio)
+phone_agent/recordings/
+
+# OS
+.DS_Store
+Thumbs.db
