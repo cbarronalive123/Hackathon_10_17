@@ -54,6 +54,9 @@ async function llm(
         messages,
         temperature: opts.temperature,
         max_tokens: opts.maxTokens,
+        // The model is a reasoning model; "low" keeps its thinking brief
+        // (~10x faster responses) instead of burning the token budget.
+        reasoning_effort: "low",
       }),
       signal: controller.signal,
     });
@@ -93,29 +96,46 @@ function parseIntent(raw: string, history: ChatMsg[], message: string): SearchIn
     checkout: isoInDays(32),
     adults: 2,
   };
+  void history;
+  void message;
+
   const cleaned = raw.replace(/```json|```/g, "").trim();
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  if (start === -1 || end <= start) return fallback;
-  try {
-    const parsed = JSON.parse(cleaned.slice(start, end + 1)) as Partial<SearchIntent>;
-    if (!parsed.search || !parsed.cityName) return fallback;
-    const checkin = /^\d{4}-\d{2}-\d{2}$/.test(String(parsed.checkin)) ? String(parsed.checkin) : fallback.checkin;
-    let checkout = /^\d{4}-\d{2}-\d{2}$/.test(String(parsed.checkout)) ? String(parsed.checkout) : fallback.checkout;
-    if (Date.parse(checkout) <= Date.parse(checkin)) checkout = fallback.checkout;
-    return {
-      search: true,
-      cityName: String(parsed.cityName).slice(0, 80),
-      countryCode: String(parsed.countryCode ?? "").toUpperCase().slice(0, 2),
-      checkin,
-      checkout,
-      adults: Math.min(Math.max(Number(parsed.adults) || 2, 1), 8),
-    };
-  } catch {
-    void history;
-    void message;
-    return fallback;
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
+  if (first === -1 || last <= first) return fallback;
+
+  // The JSON may be embedded in reasoning prose — try the whole span, then
+  // the last balanced-looking block (the final answer), then the first block.
+  const candidates = [
+    cleaned,
+    cleaned.slice(cleaned.lastIndexOf("{"), last + 1),
+    cleaned.slice(first, cleaned.indexOf("}", first) + 1),
+  ];
+  let parsed: Partial<SearchIntent> | null = null;
+  for (const c of candidates) {
+    try {
+      const obj = JSON.parse(c) as Partial<SearchIntent>;
+      if (typeof obj === "object" && obj !== null) {
+        parsed = obj;
+        break;
+      }
+    } catch {
+      // try next candidate
+    }
   }
+  if (!parsed || !parsed.search || !parsed.cityName) return fallback;
+
+  const checkin = /^\d{4}-\d{2}-\d{2}$/.test(String(parsed.checkin)) ? String(parsed.checkin) : fallback.checkin;
+  let checkout = /^\d{4}-\d{2}-\d{2}$/.test(String(parsed.checkout)) ? String(parsed.checkout) : fallback.checkout;
+  if (Date.parse(checkout) <= Date.parse(checkin)) checkout = fallback.checkout;
+  return {
+    search: true,
+    cityName: String(parsed.cityName).slice(0, 80),
+    countryCode: String(parsed.countryCode ?? "").toUpperCase().slice(0, 2),
+    checkin,
+    checkout,
+    adults: Math.min(Math.max(Number(parsed.adults) || 2, 1), 8),
+  };
 }
 
 export async function POST(req: Request) {
@@ -140,8 +160,9 @@ export async function POST(req: Request) {
       .reverse()
       .map((m) => ({ role: m.role, content: m.content }));
 
-    // Step 1: extract a live-search intent from the conversation (cheap call).
-    const intentRaw = await llm(
+    // Step 1: extract a live-search intent from the conversation.
+    // The model reasons before answering, so give it a real token budget.
+    const intentOut = await llm(
       [
         {
           role: "system",
@@ -158,13 +179,13 @@ Rules: keep dates and guest counts the traveler gave earlier in the conversation
             .join("\n")}\n\nNew message: ${message}`,
         },
       ],
-      { maxTokens: 200, temperature: 0 }
-    ).catch((err) => {
+      { maxTokens: 1600, temperature: 0 }
+    ).catch((err): { content: string; reasoning: string } => {
       console.error("intent extraction failed", err);
-      return "";
+      return { content: "", reasoning: "" };
     });
 
-    const intent = parseIntent(intentRaw, pastMsgs, message);
+    const intent = parseIntent(intentOut.content || intentOut.reasoning, pastMsgs, message);
 
     // Step 2: live search when we have a destination; fall back to the seeded catalog on failure.
     let liveHotels: LiveHotelRow[] = [];
@@ -224,7 +245,8 @@ Rules: keep dates and guest counts the traveler gave earlier in the conversation
       { role: "user", content: message },
     ];
 
-    let reply = await llm(messages, { maxTokens: 600, temperature: 0.6 });
+    const replyOut = await llm(messages, { maxTokens: 900, temperature: 0.6 });
+    let reply = replyOut.content;
     if (!reply) {
       throw new Error("Empty reply from model");
     }

@@ -9,8 +9,8 @@ Twilio api key.txt
 .playwright-mcp/
 .idea/
 
-# Personal call recordings (real names/audio)
-phone_agent/recordings/
+# Personal phone agent — excluded from the repo entirely
+phone_agent/
 
 # OS
 .DS_Store

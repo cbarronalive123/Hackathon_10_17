@@ -1,0 +1,19 @@
+{
+  "_readme": "Curated hotel phone directory used when liteAPI results carry no phone number. 'hotels' entries are matched by hotel name + city. 'chains' entries are matched when the brand appears in the hotel name. The 555-01xx sample numbers are fictional placeholders: replace them with real, verified numbers before using CALL_MODE=real, or configure GOOGLE_PLACES_API_KEY for automatic lookup.",
+  "hotels": {
+    "Park Terrace Hotel|New York": "+12125550101",
+    "LUMA Hotel - Times Square|New York": "+12125550102",
+    "Moxy NYC Chelsea|New York": "+12125550103",
+    "Arlo Midtown|New York": "+12125550104"
+  },
+  "chains": {
+    "hilton": "+18004458667",
+    "marriott": "+18002289290",
+    "ihg": "+18004654329",
+    "hyatt": "+18002288340",
+    "accor": "+18002218893",
+    "radisson": "+18003333333",
+    "best western": "+18005288783",
+    "choice": "+18774247542"
+  }
+}

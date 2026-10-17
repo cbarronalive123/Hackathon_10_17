@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StayLine — AI hotel booking calls</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">Stay<span>Line</span><small>AI phone agent that books hotel rooms</small></div>
+  <div id="health-chips" class="chips"></div>
+</header>
+<main>
+  <div class="layout">
+    <section class="card" id="search-card">
+      <h2>1 · Find a hotel <span class="sub">live Nuitée Connect rates</span></h2>
+      <form id="search-form" class="form-grid">
+        <label>City<input name="city" value="New York" required></label>
+        <label>Country<input name="country" value="US" maxlength="2"></label>
+        <label>Check-in<input name="checkin" type="date" required></label>
+        <label>Check-out<input name="checkout" type="date" required></label>
+        <label>Adults<input name="adults" type="number" min="1" max="8" value="2"></label>
+        <label>Results<input name="limit" type="number" min="1" max="50" value="12"></label>
+        <button type="submit" class="primary">Search rates</button>
+      </form>
+      <div id="search-status" class="muted"></div>
+      <div id="results" class="results"></div>
+    </section>
+
+    <section class="card">
+      <h2>2 · Guest profile <span class="sub">what the agent knows</span></h2>
+      <form id="profile-form" class="form-grid">
+        <label>Guest name<input name="guest_name" placeholder="Jane Doe"></label>
+        <label>Email<input name="guest_email" type="email" placeholder="jane@example.com"></label>
+        <label>Callback phone<input name="guest_phone" placeholder="+15194760578"></label>
+        <label>Adults<input name="adults" type="number" min="1" max="8"></label>
+        <label>Rooms<input name="rooms" type="number" min="1" max="4"></label>
+        <label>Room preference<input name="room_preference" placeholder="King or Queen room"></label>
+        <label class="wide">Budget note<input name="budget_note" placeholder="Up to $350 per night"></label>
+        <label class="wide">Payment note<input name="payment_note" placeholder="Guest will present card at check-in"></label>
+        <label class="wide">Special requests<input name="special_requests" placeholder="High floor, quiet room"></label>
+        <button type="submit" class="primary">Save profile</button>
+      </form>
+      <div id="profile-status" class="muted"></div>
+    </section>
+
+    <section class="card span2">
+      <div class="row-between">
+        <h2>3 · Calls &amp; outcomes</h2>
+        <label class="mode-picker">Call mode
+          <select id="call-mode">
+            <option value="real">real — dial the hotel</option>
+            <option value="test">test — dial my phone</option>
+            <option value="sim">sim — AI front desk</option>
+          </select>
+        </label>
+      </div>
+      <div id="mode-hint" class="muted"></div>
+      <div id="calls"></div>
+    </section>
+
+    <section class="card span2">
+      <h2>Online bookings <span class="sub">Nuitée sandbox, API-only fallback</span></h2>
+      <div id="bookings"></div>
+    </section>
+  </div>
+</main>
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
